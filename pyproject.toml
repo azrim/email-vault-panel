@@ -1,12 +1,16 @@
 [project]
 name = "email-vault-panel"
-version = "0.1.0"
-description = "Umbrel Email Vault — alias manager (phase 1) + Gmail later"
+version = "0.2.0"
+description = "Umbrel Email Vault — alias manager + Gmail vault finder"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.32.0",
   "pydantic>=2.0",
+  "google-api-python-client>=2.100.0",
+  "google-auth>=2.23.0",
+  "google-auth-oauthlib>=1.1.0",
+  "google-auth-httplib2>=0.2.0",
 ]
 
 [project.scripts]
