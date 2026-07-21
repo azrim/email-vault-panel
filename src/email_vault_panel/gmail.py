@@ -17,6 +17,8 @@ from googleapiclient.errors import HttpError
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 CLIENT_SECRETS_NAME = "gmail_client_secrets.json"
 TOKEN_NAME = "gmail_token.json"
+# Google blocks non-public redirects (.local, raw IP). Desktop/OOB works on Umbrel.
+OOB_REDIRECT_URI = "urn:ietf:wg:oauth:2.0:oob"
 
 
 class GmailError(Exception):
@@ -101,27 +103,61 @@ class GmailVault:
             )
         return json.loads(self.client_secrets_path.read_text(encoding="utf-8"))
 
+    def _client_kind(self) -> str:
+        cfg = self._client_config()
+        if "installed" in cfg:
+            return "installed"
+        if "web" in cfg:
+            return "web"
+        return "unknown"
+
     def _flow(self, redirect_uri: str) -> Flow:
         cfg = self._client_config()
-        # Normalize: Flow.from_client_config wants installed or web key
         flow = Flow.from_client_config(cfg, scopes=SCOPES, redirect_uri=redirect_uri)
         return flow
 
-    def authorization_url(self, redirect_uri: str) -> tuple[str, str]:
-        flow = self._flow(redirect_uri)
+    def authorization_url(self, redirect_uri: str | None = None) -> dict[str, Any]:
+        """Start OAuth. Prefer Desktop OOB so Umbrel .local/IP is not required."""
+        kind = self._client_kind()
+        if kind == "installed" or redirect_uri is None:
+            # Desktop app: show code to user, paste back into panel
+            use_uri = OOB_REDIRECT_URI
+            mode = "oob"
+        else:
+            use_uri = redirect_uri
+            mode = "web"
+        flow = self._flow(use_uri)
         auth_url, state = flow.authorization_url(
             access_type="offline",
             include_granted_scopes="true",
             prompt="consent",
         )
-        # persist state + redirect for callback
         state_path = self.secrets_dir / "oauth_state.json"
         state_path.write_text(
-            json.dumps({"state": state, "redirect_uri": redirect_uri}),
+            json.dumps(
+                {
+                    "state": state,
+                    "redirect_uri": use_uri,
+                    "mode": mode,
+                    "client_kind": kind,
+                }
+            ),
             encoding="utf-8",
         )
         state_path.chmod(0o600)
-        return auth_url, state
+        return {
+            "authorization_url": auth_url,
+            "redirect_uri": use_uri,
+            "state": state,
+            "mode": mode,
+            "client_kind": kind,
+            "hint": (
+                "Desktop/OOB: open the URL, allow access, copy the code Google shows, "
+                "paste it back into Email Vault."
+                if mode == "oob"
+                else "Web: Google redirects browser to the app callback URL."
+            ),
+        }
 
     def finish_oauth(self, code: str, state: str | None = None) -> dict[str, Any]:
         state_path = self.secrets_dir / "oauth_state.json"
@@ -130,9 +166,9 @@ class GmailVault:
         meta = json.loads(state_path.read_text(encoding="utf-8"))
         if state and meta.get("state") and state != meta["state"]:
             raise GmailError("OAuth state mismatch")
-        redirect_uri = meta["redirect_uri"]
+        redirect_uri = meta.get("redirect_uri") or OOB_REDIRECT_URI
         flow = self._flow(redirect_uri)
-        flow.fetch_token(code=code)
+        flow.fetch_token(code=code.strip())
         creds = flow.credentials
         self._save_creds(creds)
         try:

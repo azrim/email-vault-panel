@@ -72,6 +72,13 @@ class ClientSecretsBody(BaseModel):
     client_secrets: dict[str, Any] | str
 
 
+class OAuthCodeBody(BaseModel):
+    """Paste the one-time code Google shows after Desktop/OOB consent."""
+
+    code: str
+    state: str | None = None
+
+
 def _request_base(request: Request) -> str:
     if PUBLIC_BASE_URL:
         return PUBLIC_BASE_URL
@@ -193,12 +200,33 @@ def gmail_upload_secrets(body: ClientSecretsBody) -> dict[str, Any]:
 
 @app.get("/api/gmail/auth/start")
 def gmail_auth_start(request: Request) -> dict[str, Any]:
-    redirect_uri = f"{_request_base(request)}/api/gmail/auth/callback"
+    """Start OAuth. Desktop clients use OOB (paste code); Web can use callback."""
+    # Prefer OOB so Umbrel .local / LAN IP is not sent to Google as redirect
     try:
-        url, state = get_gmail().authorization_url(redirect_uri)
+        kind = "unknown"
+        if get_gmail().has_client_secrets():
+            cfg = get_gmail()._client_config()
+            kind = "installed" if "installed" in cfg else "web" if "web" in cfg else "unknown"
+        if kind == "web":
+            redirect_uri = f"{_request_base(request)}/api/gmail/auth/callback"
+            data = get_gmail().authorization_url(redirect_uri)
+        else:
+            data = get_gmail().authorization_url(None)
     except GmailError as e:
         raise HTTPException(400, str(e)) from e
-    return {"authorization_url": url, "redirect_uri": redirect_uri, "state": state}
+    return data
+
+
+@app.post("/api/gmail/auth/code")
+def gmail_auth_code(body: OAuthCodeBody) -> dict[str, Any]:
+    """Exchange pasted OOB / Desktop code for tokens (no public redirect needed)."""
+    if not body.code.strip():
+        raise HTTPException(400, "code required")
+    try:
+        status = get_gmail().finish_oauth(body.code, body.state)
+    except GmailError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"ok": True, "status": status}
 
 
 @app.get("/api/gmail/auth/callback")
