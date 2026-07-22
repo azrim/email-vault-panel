@@ -73,10 +73,16 @@ class ClientSecretsBody(BaseModel):
 
 
 class OAuthCodeBody(BaseModel):
-    """Paste the one-time code Google shows after Desktop/OOB consent."""
+    """Authorization code (loopback/web) or unused for token import."""
 
     code: str
     state: str | None = None
+
+
+class TokenImportBody(BaseModel):
+    """Paste token JSON from scripts/oauth_desktop_helper.py."""
+
+    token: dict[str, Any] | str
 
 
 def _request_base(request: Request) -> str:
@@ -200,13 +206,18 @@ def gmail_upload_secrets(body: ClientSecretsBody) -> dict[str, Any]:
 
 @app.get("/api/gmail/auth/start")
 def gmail_auth_start(request: Request) -> dict[str, Any]:
-    """Start OAuth. Desktop clients use OOB (paste code); Web can use callback."""
-    # Prefer OOB so Umbrel .local / LAN IP is not sent to Google as redirect
+    """Start OAuth metadata for UI. Desktop uses helper+token import."""
     try:
         kind = "unknown"
         if get_gmail().has_client_secrets():
             cfg = get_gmail()._client_config()
-            kind = "installed" if "installed" in cfg else "web" if "web" in cfg else "unknown"
+            kind = (
+                "installed"
+                if "installed" in cfg
+                else "web"
+                if "web" in cfg
+                else "unknown"
+            )
         if kind == "web":
             redirect_uri = f"{_request_base(request)}/api/gmail/auth/callback"
             data = get_gmail().authorization_url(redirect_uri)
@@ -219,13 +230,24 @@ def gmail_auth_start(request: Request) -> dict[str, Any]:
 
 @app.post("/api/gmail/auth/code")
 def gmail_auth_code(body: OAuthCodeBody) -> dict[str, Any]:
-    """Exchange pasted OOB / Desktop code for tokens (no public redirect needed)."""
     if not body.code.strip():
         raise HTTPException(400, "code required")
     try:
         status = get_gmail().finish_oauth(body.code, body.state)
     except GmailError as e:
         raise HTTPException(400, str(e)) from e
+    return {"ok": True, "status": status}
+
+
+@app.post("/api/gmail/auth/import-token")
+def gmail_import_token(body: TokenImportBody) -> dict[str, Any]:
+    """Import token JSON from desktop helper (recommended path for Umbrel)."""
+    try:
+        status = get_gmail().import_token(body.token)
+    except GmailError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"invalid token: {e}") from e
     return {"ok": True, "status": status}
 
 

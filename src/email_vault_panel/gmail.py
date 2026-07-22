@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +17,9 @@ from googleapiclient.errors import HttpError
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 CLIENT_SECRETS_NAME = "gmail_client_secrets.json"
 TOKEN_NAME = "gmail_token.json"
-# Google blocks non-public redirects (.local, raw IP). Desktop/OOB works on Umbrel.
+# OOB is blocked by Google. Desktop apps must use loopback IP redirect.
+LOOPBACK_REDIRECT_URI = "http://127.0.0.1:8765/"
+# Legacy constant kept only for error messages
 OOB_REDIRECT_URI = "urn:ietf:wg:oauth:2.0:oob"
 
 
@@ -117,15 +119,23 @@ class GmailVault:
         return flow
 
     def authorization_url(self, redirect_uri: str | None = None) -> dict[str, Any]:
-        """Start OAuth. Prefer Desktop OOB so Umbrel .local/IP is not required."""
+        """Start OAuth.
+
+        Desktop (installed): loopback http://127.0.0.1:PORT/ (OOB is blocked by Google).
+        Web: caller-supplied public https redirect.
+        """
         kind = self._client_kind()
-        if kind == "installed" or redirect_uri is None:
-            # Desktop app: show code to user, paste back into panel
-            use_uri = OOB_REDIRECT_URI
-            mode = "oob"
+        if kind == "installed" or not redirect_uri:
+            use_uri = os.environ.get("GMAIL_LOOPBACK_REDIRECT", LOOPBACK_REDIRECT_URI)
+            mode = "loopback"
         else:
             use_uri = redirect_uri
             mode = "web"
+        if use_uri.startswith("urn:ietf:wg:oauth:2.0:oob") or use_uri == "oob":
+            raise GmailError(
+                "Google blocked OOB (copy/paste) OAuth. Use Desktop client with "
+                f"loopback redirect {LOOPBACK_REDIRECT_URI} and the PC helper script."
+            )
         flow = self._flow(use_uri)
         auth_url, state = flow.authorization_url(
             access_type="offline",
@@ -152,21 +162,26 @@ class GmailVault:
             "mode": mode,
             "client_kind": kind,
             "hint": (
-                "Desktop/OOB: open the URL, allow access, copy the code Google shows, "
-                "paste it back into Email Vault."
-                if mode == "oob"
-                else "Web: Google redirects browser to the app callback URL."
+                "Desktop/loopback: run oauth_desktop_helper.py on a PC/browser host "
+                "with the same client secrets JSON; it listens on 127.0.0.1 and "
+                "prints a token to paste into Email Vault."
+                if mode == "loopback"
+                else "Web: Google redirects to the app callback URL."
             ),
         }
 
     def finish_oauth(self, code: str, state: str | None = None) -> dict[str, Any]:
         state_path = self.secrets_dir / "oauth_state.json"
-        if not state_path.is_file():
-            raise GmailError("OAuth state missing — start auth again")
-        meta = json.loads(state_path.read_text(encoding="utf-8"))
-        if state and meta.get("state") and state != meta["state"]:
-            raise GmailError("OAuth state mismatch")
-        redirect_uri = meta.get("redirect_uri") or OOB_REDIRECT_URI
+        meta: dict[str, Any] = {}
+        if state_path.is_file():
+            meta = json.loads(state_path.read_text(encoding="utf-8"))
+            if state and meta.get("state") and state != meta["state"]:
+                raise GmailError("OAuth state mismatch")
+        # Allow finishing without prior start when helper already exchanged code
+        # (token paste path uses import_token instead).
+        redirect_uri = meta.get("redirect_uri") or os.environ.get(
+            "GMAIL_LOOPBACK_REDIRECT", LOOPBACK_REDIRECT_URI
+        )
         flow = self._flow(redirect_uri)
         flow.fetch_token(code=code.strip())
         creds = flow.credentials
@@ -176,6 +191,38 @@ class GmailVault:
         except TypeError:
             if state_path.exists():
                 state_path.unlink()
+        return self.status()
+
+    def import_token(self, token_json: dict[str, Any] | str) -> dict[str, Any]:
+        """Import credentials JSON produced by desktop helper / google-auth."""
+        if isinstance(token_json, str):
+            data = json.loads(token_json)
+        else:
+            data = token_json
+        # Accept either authorized-user format or {token, refresh_token, ...}
+        if "refresh_token" not in data and "token" not in data:
+            raise GmailError("token JSON missing refresh_token/token fields")
+        # Normalize to google authorized-user file shape
+        if "client_id" not in data or "client_secret" not in data:
+            cfg = self._client_config()
+            block = cfg.get("installed") or cfg.get("web") or {}
+            data = {
+                "token": data.get("token") or data.get("access_token"),
+                "refresh_token": data.get("refresh_token"),
+                "token_uri": data.get("token_uri")
+                or block.get("token_uri")
+                or "https://oauth2.googleapis.com/token",
+                "client_id": block.get("client_id"),
+                "client_secret": block.get("client_secret"),
+                "scopes": data.get("scopes") or SCOPES,
+                "universe_domain": data.get("universe_domain", "googleapis.com"),
+                "account": data.get("account", ""),
+                "expiry": data.get("expiry"),
+            }
+        creds = Credentials.from_authorized_user_info(data, SCOPES)
+        if not creds.valid and creds.refresh_token:
+            creds.refresh(Request())
+        self._save_creds(creds)
         return self.status()
 
     def disconnect(self) -> None:

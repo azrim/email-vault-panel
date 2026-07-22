@@ -202,25 +202,28 @@
         </div>
       </div>
       <details style="margin-top:.75rem" open>
-        <summary style="cursor:pointer;color:var(--muted);font-size:.85rem">Setup Gmail (Umbrel / no public domain)</summary>
+        <summary style="cursor:pointer;color:var(--muted);font-size:.85rem">Setup Gmail (recommended path)</summary>
         <p style="color:var(--muted);font-size:.8rem;margin:.5rem 0">
-          Google <strong>rejects</strong> redirects like <code>*.local</code> or raw IP.
-          Use OAuth client type <strong>Desktop app</strong> (JSON has <code>"installed"</code>).
-          No redirect URI to register. Flow: open Google → allow → copy code → paste below.
+          Google <strong>blocks</strong> OOB paste-code and rejects <code>*.local</code> redirects.
+          On a <strong>PC/laptop</strong> (not Umbrel container):
         </p>
-        <p style="color:var(--muted);font-size:.75rem;margin:.25rem 0">
-          Optional Web client only if you have a public domain redirect (e.g. tunnel).
-        </p>
-        <textarea id="clientSecrets" rows="4" style="width:100%;font-family:ui-monospace,monospace;font-size:.75rem" placeholder='{"installed":{"client_id":"...","client_secret":"...",...}}'></textarea>
+        <ol style="color:var(--muted);font-size:.8rem;margin:.25rem 0 0.5rem 1.1rem">
+          <li>Google Cloud → OAuth client type <strong>Desktop app</strong> → download JSON</li>
+          <li>Paste JSON below → Save</li>
+          <li>On PC: <code>pip install google-auth-oauthlib</code> then<br/>
+            <code>python oauth_desktop_helper.py client_secret.json</code></li>
+          <li>Browser opens → login vault Gmail → Allow</li>
+          <li>Copy the printed <strong>token JSON</strong> → paste under Import token → Submit</li>
+        </ol>
+        <textarea id="clientSecrets" rows="3" style="width:100%;font-family:ui-monospace,monospace;font-size:.75rem" placeholder='{"installed":{...}} Desktop client JSON'></textarea>
         <div class="row" style="margin-top:.5rem">
           <button type="button" id="btnSaveSecrets">Save client secrets</button>
         </div>
-        <div id="oauthCodeBox" style="margin-top:.75rem;display:none">
-          <label>Paste code from Google</label>
-          <input id="oauthCode" type="text" placeholder="4/0A…" style="width:100%;margin-top:.25rem" />
+        <div style="margin-top:.75rem">
+          <label>Import token JSON (from helper)</label>
+          <textarea id="tokenJson" rows="4" style="width:100%;font-family:ui-monospace,monospace;font-size:.75rem;margin-top:.25rem" placeholder='{"token":"...","refresh_token":"...",...}'></textarea>
           <div class="row" style="margin-top:.5rem">
-            <button type="button" class="primary" id="btnSubmitCode">Submit code</button>
-            <a id="oauthLink" href="#" target="_blank" rel="noopener" style="color:var(--accent);font-size:.85rem">Open Google auth again</a>
+            <button type="button" class="primary" id="btnImportToken">Import token</button>
           </div>
         </div>
       </details>
@@ -508,15 +511,15 @@
 
     $("btnGmailConnect").addEventListener("click", async () => {
       try {
+        toast("On Umbrel: use Desktop helper on PC + Import token (Connect alone will fail OOB)");
         const data = await api("/api/gmail/auth/start");
-        if (data.mode === "oob" || data.redirect_uri === "urn:ietf:wg:oauth:2.0:oob") {
-          $("oauthCodeBox").style.display = "block";
+        if (data.mode === "loopback") {
+          toast(data.hint || "Run oauth_desktop_helper.py on your PC");
           if (data.authorization_url) {
-            $("oauthLink").href = data.authorization_url;
-            window.open(data.authorization_url, "_blank", "noopener");
+            // optional: open auth URL only if user runs helper that matches state — prefer helper
+            console.log("auth start", data);
           }
-          toast("Allow access di Google, lalu paste code di sini");
-        } else {
+        } else if (data.authorization_url) {
           window.location.href = data.authorization_url;
         }
       } catch (e) {
@@ -524,17 +527,17 @@
       }
     });
 
-    $("btnSubmitCode").addEventListener("click", async () => {
+    $("btnImportToken").addEventListener("click", async () => {
       try {
-        const code = $("oauthCode").value.trim();
-        if (!code) throw new Error("paste the code from Google first");
-        await api("/api/gmail/auth/code", {
+        const raw = $("tokenJson").value.trim();
+        if (!raw) throw new Error("paste token JSON from desktop helper");
+        const parsed = JSON.parse(raw);
+        await api("/api/gmail/auth/import-token", {
           method: "POST",
-          body: JSON.stringify({ code }),
+          body: JSON.stringify({ token: parsed }),
         });
-        toast("Gmail connected");
-        $("oauthCode").value = "";
-        $("oauthCodeBox").style.display = "none";
+        toast("Gmail connected (token imported)");
+        $("tokenJson").value = "";
         await loadGmailStatus();
       } catch (e) {
         toast(e.message || String(e));

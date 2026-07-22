@@ -1,6 +1,6 @@
 [project]
 name = "email-vault-panel"
-version = "0.2.1"
+version = "0.2.2"
 description = "Umbrel Email Vault — alias manager + Gmail vault finder (Desktop OOB OAuth)"
 requires-python = ">=3.11"
 dependencies = [
